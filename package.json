@@ -4,11 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "generate:members": "node scripts/generate-member-directory.mjs",
     "import:members": "node --env-file=.env.local scripts/import-members.mjs",
-    "predev": "npm run generate:members",
     "dev": "vite",
-    "prebuild": "npm run generate:members",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview"

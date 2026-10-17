@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 .env.test
+members-2026-10-03.json
 /src/generated/memberDirectory.ts
 
 # Editor directories and files
