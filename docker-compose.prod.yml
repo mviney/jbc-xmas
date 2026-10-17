@@ -1,0 +1,14 @@
+services:
+  frontend:
+    build:
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:?Set VITE_SUPABASE_URL in .env.local}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY:?Set VITE_SUPABASE_ANON_KEY in .env.local}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jbc-xmas-prod.rule=Host(`jbc-xmas.bridge.monster.viney.net.au`)"
+      - "traefik.http.routers.jbc-xmas-prod.entrypoints=websecure,websecure-wan"
+      - "traefik.http.routers.jbc-xmas-prod.tls=true"
+      - "traefik.http.routers.jbc-xmas-prod.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jbc-xmas-prod.loadbalancer.server.port=8080"
+      - "traefik.docker.network=traefik-public"

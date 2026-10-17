@@ -1,0 +1,2 @@
+[functions.reserve-seats]
+verify_jwt = false

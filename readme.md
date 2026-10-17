@@ -108,13 +108,12 @@ Display directly below statistics.
 
 Placeholder:
 
-"Looking for a friend? Search by name or ticket number"
+"Looking for a friend? Search by name or table number"
 
 Search supports:
 
 - Member Name
 - Guest Name
-- Ticket Number
 - Table Number
 
 Matching tables should be highlighted.
@@ -371,9 +370,9 @@ Display occupied seats and available seats.
 
 Example:
 
-Michael Viney (#127)
+Michael Viney
 
-Karen Viney (#128)
+Karen Viney
 
 Available
 
@@ -418,11 +417,11 @@ Table 7
 
 Example:
 
-Michael Viney (#127)
+Michael Viney
 
-Karen Viney (#128)
+Karen Viney
 
-John Smith (#129)
+John Smith
 
 Available
 
@@ -444,7 +443,7 @@ Searching should:
 
 - Highlight matching tables.
 - Auto-scroll to matching table.
-- Search tickets, names and tables.
+- Search attendee names and table numbers.
 
 Examples:
 
@@ -452,11 +451,11 @@ Search "Michael"
 
 → Table 7
 
-Search "128"
-
-→ Karen Viney
+Search "7"
 
 → Table 7
+
+Public seating results show names and table assignments only. Ticket numbers and dietary details remain private.
 
 ---
 
@@ -616,8 +615,70 @@ Provide:
 
 - Dockerfile
 - docker-compose.yml
+- docker-compose.prod.yml
 - docker-compose.test.yml
-- docker-compose.override.yml
+- nginx.conf
+- .dockerignore
+
+The image builds the Vite app and serves it from an unprivileged Nginx container. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in `.env.local`; these public browser values are injected at build time. The container does not receive the Supabase secret key.
+
+Production and test use separate Supabase projects. Create a test project, apply the SQL migrations in `supabase/migrations/`, deploy `reserve-seats`, and configure its Turnstile function secrets before deploying the test stack. Copy `.env.test.example` to the ignored `.env.test` file and set `TEST_SUPABASE_URL` and `TEST_SUPABASE_ANON_KEY` from that test project. The test Compose overlay requires these separate variables, so it cannot silently fall back to production credentials. The currently authenticated Supabase account has no separate test project yet.
+
+Traefik must be running with its external `traefik-public` network, `websecure` and `websecure-wan` entrypoints, and the `letsencrypt` certificate resolver. DNS for both hostnames must point to the Traefik host.
+
+Build and start production:
+
+```bash
+docker compose --env-file .env.local -f docker-compose.yml -f docker-compose.prod.yml -p jbc-xmas-prod up -d --build
+```
+
+Build and start test:
+
+```bash
+docker compose --env-file .env.test -f docker-compose.yml -f docker-compose.test.yml -p jbc-xmas-test up -d --build
+```
+
+Starting either stack registers its hostname with Traefik, which requests a certificate through the configured resolver.
+
+---
+
+# Supabase Setup
+
+The public app reads the seating board and member lookup through database functions. Direct access to member and attendee tables is disabled for public roles. Reservations are inserted through a database function that checks ticket uniqueness and table capacity in one transaction.
+
+## Configure
+
+Set the browser-safe project values in the ignored `.env.local` file:
+
+```env
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-publishable-or-anon-key
+```
+
+Apply the SQL files in `supabase/migrations/` in filename order in the Supabase SQL Editor. Then add a Supabase secret key to `.env.local` for the one-time member import only. The legacy service-role key is also accepted:
+
+```env
+SUPABASE_SECRET_KEY=your-secret-key
+```
+
+Run `npm run import:members` after applying the migration. This elevated key is only read by the Node import script; never use it in a `VITE_` variable or client-side code, and remove it from `.env.local` after importing.
+
+The migration creates 15 tables with 12 seats each. To change that layout, update the migration and the `TABLES` constant in `src/App.tsx` together.
+
+The public board displays attendee names, guest/member status, and table numbers. Ticket numbers and dietary details are not returned by its public database function. The member search function returns at most eight matches for public registration.
+
+## Turnstile
+
+The form uses the existing Turnstile site key in `src/lib/turnstile.ts`. The browser sends its one-use token to the `reserve-seats` Supabase Edge Function; that function verifies the token with Cloudflare Siteverify, checking the `signup` action and exact request hostname before calling the database reservation function. Migration `202610170004_protect_reservation_rpc.sql` prevents public roles from bypassing the Edge Function.
+
+In Supabase Dashboard, add these Edge Function secrets:
+
+- `TURNSTILE_SECRET`: the secret for the existing Turnstile widget. Do not put it in `.env.local`, a `VITE_` variable, source control, or chat.
+- `TURNSTILE_ALLOWED_HOSTNAMES`: comma-separated hostnames for this deployment, without schemes or paths. Production should contain only its approved public hostname; do not include `localhost` or `127.0.0.1` in production.
+
+Ensure the existing widget allows the deployment hostname. Apply all SQL migrations in filename order, then deploy with `supabase functions deploy reserve-seats`. The project must have the Supabase Edge Functions runtime variables `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` available; the secret key is used only server-side.
+
+For local testing against a local Supabase stack, set its function hostname allowlist to `localhost,127.0.0.1` and ensure those hostnames are enabled on the Turnstile widget. Do not add those local hostnames to the production function allowlist.
 - .dockerignore
 - Makefile
 

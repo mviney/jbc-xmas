@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useDeferredValue, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { TurnstileWidget } from './lib/TurnstileWidget'
+import { TURNSTILE_SITE_KEY } from './lib/turnstile'
 import {
   Armchair,
   ArrowDownRight,
@@ -15,21 +18,16 @@ import {
   Users,
   Utensils,
 } from 'lucide-react'
-import { memberDirectory } from './generated/memberDirectory'
+import { getPublicAttendees, reserveSeats, searchMembers, type MemberLookupEntry } from './lib/eventData'
 import './App.css'
 
 type DietaryRequirement = 'Vegetarian' | 'Nut-Free' | 'Gluten-Free'
 
 type Attendee = {
   id: string
-  memberId?: string
   name: string
-  ticketNumber: string
   tableNumber: number
   isGuest: boolean
-  registeredBy?: string
-  dietaryRequirements: DietaryRequirement[]
-  dietaryNotes: string
 }
 
 const TABLES = Array.from({ length: 15 }, (_, index) => ({
@@ -37,29 +35,7 @@ const TABLES = Array.from({ length: 15 }, (_, index) => ({
   capacity: 12,
 }))
 
-const STORAGE_KEY = 'jbc-xmas-attendees'
 const EXPANDED_KEY = 'jbc-xmas-expanded-tables'
-
-function fuzzyScore(value: string, query: string) {
-  if (value.includes(query)) return value.startsWith(query) ? 0 : 1
-
-  let position = 0
-  for (const character of query) {
-    position = value.indexOf(character, position)
-    if (position < 0) return Number.POSITIVE_INFINITY
-    position += 1
-  }
-  return 2 + (position - query.length) / Math.max(value.length, 1)
-}
-
-function loadAttendees(): Attendee[] {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    return saved ? (JSON.parse(saved) as Attendee[]) : []
-  } catch {
-    return []
-  }
-}
 
 function loadExpandedTables(): number[] {
   try {
@@ -71,11 +47,39 @@ function loadExpandedTables(): number[] {
 }
 
 function App() {
-  const [attendees, setAttendees] = useState<Attendee[]>(loadAttendees)
+  const queryClient = useQueryClient()
+  const attendeesQuery = useQuery({
+    queryKey: ['public-attendees'],
+    queryFn: getPublicAttendees,
+    refetchInterval: 15_000,
+  })
+  const attendees = (attendeesQuery.data ?? [])
+    .toSorted((left, right) => {
+      const tableOrder = left.table_number - right.table_number
+      if (tableOrder) return tableOrder
+
+      const hasGroupInfo = left.registered_by_attendee_id !== undefined &&
+        right.registered_by_attendee_id !== undefined
+      const groupOrder = hasGroupInfo
+        ? (left.registered_by_attendee_id ?? left.id).localeCompare(right.registered_by_attendee_id ?? right.id)
+        : 0
+
+      return groupOrder || Number(left.is_guest) - Number(right.is_guest) || left.name.localeCompare(right.name)
+    })
+    .map((attendee) => ({
+      id: attendee.id,
+      name: attendee.name,
+      tableNumber: attendee.table_number,
+      isGuest: attendee.is_guest,
+    })) satisfies Attendee[]
+  const reservationMutation = useMutation({
+    mutationFn: reserveSeats,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['public-attendees'] }),
+  })
   const [expandedTables, setExpandedTables] = useState<number[]>(loadExpandedTables)
   const [search, setSearch] = useState('')
   const [memberName, setMemberName] = useState('')
-  const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null)
+  const [selectedMember, setSelectedMember] = useState<MemberLookupEntry | null>(null)
   const [activeMemberSuggestion, setActiveMemberSuggestion] = useState(0)
   const [isMemberListOpen, setIsMemberListOpen] = useState(false)
   const [memberTicket, setMemberTicket] = useState('')
@@ -84,13 +88,14 @@ function App() {
   const [guestTicket, setGuestTicket] = useState('')
   const [dietaryRequirements, setDietaryRequirements] = useState<DietaryRequirement[]>([])
   const [dietaryNotes, setDietaryNotes] = useState('')
+  const [guestDietaryRequirements, setGuestDietaryRequirements] = useState<DietaryRequirement[]>([])
+  const [guestDietaryNotes, setGuestDietaryNotes] = useState('')
   const [preferredTable, setPreferredTable] = useState(1)
   const [formMessage, setFormMessage] = useState('')
   const [savedMessage, setSavedMessage] = useState(false)
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(attendees))
-  }, [attendees])
+  const [turnstileToken, setTurnstileToken] = useState('')
+  const [turnstileError, setTurnstileError] = useState(false)
+  const [turnstileResetNonce, setTurnstileResetNonce] = useState(0)
 
   useEffect(() => {
     localStorage.setItem(EXPANDED_KEY, JSON.stringify(expandedTables))
@@ -101,26 +106,14 @@ function App() {
   const guestCount = attendeeCount - memberCount
   const totalCapacity = TABLES.reduce((total, table) => total + table.capacity, 0)
   const remainingPlaces = totalCapacity - attendeeCount
-  const selectedMember = memberDirectory.find((member) => member.id === selectedMemberId)
-  const memberSuggestions = useMemo(() => {
-    const query = memberName.trim().toLowerCase()
-    if (!query || selectedMemberId) return []
-
-    const terms = query.split(/\s+/)
-    return memberDirectory
-      .map((member) => {
-        const name = member.name.toLowerCase()
-        const number = member.abfNumber.toLowerCase()
-        const score = terms.reduce(
-          (total, term) => total + Math.min(fuzzyScore(name, term), fuzzyScore(number, term)),
-          0,
-        )
-        return { member, score }
-      })
-      .filter(({ score }) => Number.isFinite(score))
-      .sort((left, right) => left.score - right.score || left.member.name.localeCompare(right.member.name))
-      .slice(0, 8)
-  }, [memberName, selectedMemberId])
+  const deferredMemberName = useDeferredValue(memberName.trim())
+  const memberSuggestionsQuery = useQuery({
+    queryKey: ['member-search', deferredMemberName],
+    queryFn: () => searchMembers(deferredMemberName),
+    enabled: deferredMemberName.length >= 2 && !selectedMember,
+    staleTime: 60_000,
+  })
+  const memberSuggestions = memberSuggestionsQuery.data ?? []
 
   const normalizedSearch = search.trim().toLowerCase().replace(/^table\s*/, '')
   const matchingTables = useMemo(() => {
@@ -135,14 +128,13 @@ function App() {
 
     attendees.forEach((attendee) => {
       if (
-        attendee.name.toLowerCase().includes(normalizedSearch) ||
-        attendee.ticketNumber.toLowerCase().includes(search.trim().toLowerCase())
+        attendee.name.toLowerCase().includes(normalizedSearch)
       ) {
         matched.add(attendee.tableNumber)
       }
     })
     return matched
-  }, [attendees, normalizedSearch, search])
+  }, [attendees, normalizedSearch])
 
   useEffect(() => {
     if (matchingTables.size === 0 || !search.trim()) return
@@ -170,8 +162,16 @@ function App() {
     )
   }
 
-  const selectMember = (member: (typeof memberDirectory)[number]) => {
-    setSelectedMemberId(member.id)
+  const toggleGuestDietary = (requirement: DietaryRequirement) => {
+    setGuestDietaryRequirements((current) =>
+      current.includes(requirement)
+        ? current.filter((item) => item !== requirement)
+        : [...current, requirement],
+    )
+  }
+
+  const selectMember = (member: MemberLookupEntry) => {
+    setSelectedMember(member)
     setMemberName(member.name)
     setActiveMemberSuggestion(0)
     setIsMemberListOpen(false)
@@ -187,29 +187,26 @@ function App() {
       setActiveMemberSuggestion((index) => (index - 1 + memberSuggestions.length) % memberSuggestions.length)
     } else if (event.key === 'Enter' && memberSuggestions[activeMemberSuggestion]) {
       event.preventDefault()
-      selectMember(memberSuggestions[activeMemberSuggestion].member)
+      selectMember(memberSuggestions[activeMemberSuggestion])
     } else if (event.key === 'Escape') {
       setIsMemberListOpen(false)
     }
   }
 
-  const submitReservation = (event: FormEvent<HTMLFormElement>) => {
+  const submitReservation = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setFormMessage('')
     setSavedMessage(false)
 
     const memberTicketNumber = memberTicket.trim()
     const guestNumber = guestTicket.trim()
-    const tickets = attendees.map((attendee) => attendee.ticketNumber.toLowerCase())
-
     if (!selectedMember) {
       setFormMessage('Choose a member from the current members list.')
       return
     }
 
-    const existingMember = attendees.find((attendee) => attendee.memberId === selectedMember.id)
-    if (existingMember) {
-      setFormMessage(`${selectedMember.name} is already seated at Table ${existingMember.tableNumber}.`)
+    if (!turnstileToken) {
+      setFormMessage('Complete the security check before reserving.')
       return
     }
 
@@ -217,58 +214,62 @@ function App() {
       setFormMessage('Each attendee needs a different ticket number.')
       return
     }
-    if (tickets.includes(memberTicketNumber.toLowerCase())) {
-      setFormMessage(`Ticket #${memberTicketNumber} already has a reservation.`)
-      return
-    }
-    if (addGuest && tickets.includes(guestNumber.toLowerCase())) {
-      setFormMessage(`Ticket #${guestNumber} already has a reservation.`)
-      return
-    }
-
     const seatsRequested = addGuest ? 2 : 1
-    const seatsAvailable = TABLES.find((table) => table.number === preferredTable)!.capacity -
+    const selectedTable = TABLES.find((table) => table.number === preferredTable)
+    if (!selectedTable) {
+      setFormMessage('Choose a valid table.')
+      return
+    }
+    const seatsAvailable = selectedTable.capacity -
       tableAttendees(preferredTable).length
     if (seatsAvailable < seatsRequested) {
       setFormMessage(`Table ${preferredTable} does not have enough seats for this reservation.`)
       return
     }
 
-    const newAttendees: Attendee[] = [
-      {
-        id: crypto.randomUUID(),
-        memberId: selectedMember.id,
-        name: memberName.trim(),
-        ticketNumber: memberTicketNumber,
-        tableNumber: preferredTable,
-        isGuest: false,
-        dietaryRequirements,
-        dietaryNotes: dietaryNotes.trim(),
-      },
-    ]
-    if (addGuest) {
-      newAttendees.push({
-        id: crypto.randomUUID(),
-        name: guestName.trim(),
-        ticketNumber: guestNumber,
-        tableNumber: preferredTable,
-        isGuest: true,
-        registeredBy: memberName.trim(),
-        dietaryRequirements: [],
-        dietaryNotes: '',
+    try {
+      await reservationMutation.mutateAsync({
+        reservation: {
+          memberId: selectedMember.id,
+          memberTicketNumber,
+          tableNumber: preferredTable,
+          dietaryRequirements,
+          dietaryNotes: dietaryNotes.trim(),
+          guestName: addGuest ? guestName.trim() : null,
+          guestTicketNumber: addGuest ? guestNumber : null,
+          guestDietaryRequirements: addGuest ? guestDietaryRequirements : [],
+          guestDietaryNotes: addGuest ? guestDietaryNotes.trim() : '',
+        },
+        turnstileToken,
       })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      if (message.includes('member_already_registered')) {
+        setFormMessage(`${selectedMember.name} already has a reservation.`)
+      } else if (message.includes('ticket_already_registered') || message.includes('23505')) {
+        setFormMessage('That ticket number already has a reservation.')
+      } else if (message.includes('table_full')) {
+        setFormMessage(`Table ${preferredTable} no longer has enough seats for this reservation.`)
+      } else {
+        setFormMessage('We could not save your reservation. Please try again.')
+      }
+      return
+    } finally {
+      setTurnstileToken('')
+      setTurnstileResetNonce((nonce) => nonce + 1)
     }
 
-    setAttendees((current) => [...current, ...newAttendees])
     setSavedMessage(true)
     setMemberName('')
-    setSelectedMemberId(null)
+    setSelectedMember(null)
     setMemberTicket('')
     setAddGuest(false)
     setGuestName('')
     setGuestTicket('')
     setDietaryRequirements([])
     setDietaryNotes('')
+    setGuestDietaryRequirements([])
+    setGuestDietaryNotes('')
   }
 
   return (
@@ -338,7 +339,7 @@ function App() {
                       aria-autocomplete="list"
                       aria-expanded={isMemberListOpen && memberSuggestions.length > 0}
                       aria-controls="member-suggestions"
-                      aria-activedescendant={memberSuggestions[activeMemberSuggestion] ? `member-option-${memberSuggestions[activeMemberSuggestion].member.id}` : undefined}
+                      aria-activedescendant={memberSuggestions[activeMemberSuggestion] ? `member-option-${memberSuggestions[activeMemberSuggestion].id}` : undefined}
                       autoComplete="off"
                       placeholder="Search name or ABF number"
                       value={memberName}
@@ -346,16 +347,16 @@ function App() {
                       onKeyDown={handleMemberKeyDown}
                       onChange={(event) => {
                         setMemberName(event.target.value)
-                        setSelectedMemberId(null)
+                        setSelectedMember(null)
                         setActiveMemberSuggestion(0)
                         setIsMemberListOpen(true)
                       }}
                       required
                     />
-                    {selectedMember && <small className="member-number-note">ABF number · {selectedMember.abfNumber || 'not listed'}</small>}
+                    {selectedMember && <small className="member-number-note">ABF number · {selectedMember.abf_number || 'not listed'}</small>}
                     {isMemberListOpen && memberSuggestions.length > 0 && (
                       <div className="member-suggestions" id="member-suggestions" role="listbox">
-                        {memberSuggestions.map(({ member }, index) => (
+                        {memberSuggestions.map((member, index) => (
                           <button
                             className={`member-suggestion ${index === activeMemberSuggestion ? 'is-active' : ''}`}
                             id={`member-option-${member.id}`}
@@ -367,12 +368,12 @@ function App() {
                             onClick={() => selectMember(member)}
                           >
                             <span>{member.name}</span>
-                            <small>{member.abfNumber ? `ABF #${member.abfNumber}` : 'ABF number not listed'}</small>
+                            <small>{member.abf_number ? `ABF #${member.abf_number}` : 'ABF number not listed'}</small>
                           </button>
                         ))}
                       </div>
                     )}
-                    {isMemberListOpen && memberName.trim() && memberSuggestions.length === 0 && (
+                    {isMemberListOpen && memberName.trim().length >= 2 && !memberSuggestionsQuery.isFetching && memberSuggestions.length === 0 && (
                       <p className="member-no-results">No current member matches. Check the spelling or number.</p>
                     )}
                   </div>
@@ -409,6 +410,21 @@ function App() {
                 </div>
                 <label className="notes-field"><span>Anything else we should know?</span><input maxLength={100} placeholder="Additional dietary notes (100 characters max)" value={dietaryNotes} onChange={(event) => setDietaryNotes(event.target.value)} /><small>{dietaryNotes.length}/100</small></label>
               </fieldset>
+
+              {addGuest && (
+                <fieldset className="dietary-fieldset">
+                  <legend><Utensils size={15} /> Guest dietary requirements <span>OPTIONAL</span></legend>
+                  <div className="dietary-options">
+                    {(['Vegetarian', 'Nut-Free', 'Gluten-Free'] as DietaryRequirement[]).map((item) => (
+                      <label className="dietary-option" key={item}>
+                        <input type="checkbox" checked={guestDietaryRequirements.includes(item)} onChange={() => toggleGuestDietary(item)} />
+                        <span className="custom-check"><Check size={13} /></span>{item}
+                      </label>
+                    ))}
+                  </div>
+                  <label className="notes-field"><span>Anything else we should know about your guest?</span><input maxLength={100} placeholder="Guest dietary notes (100 characters max)" value={guestDietaryNotes} onChange={(event) => setGuestDietaryNotes(event.target.value)} /><small>{guestDietaryNotes.length}/100</small></label>
+                </fieldset>
+              )}
             </div>
 
             <aside className="form-aside">
@@ -423,7 +439,17 @@ function App() {
               </label>
               <div className="table-preview"><span className="preview-number">{String(preferredTable).padStart(2, '0')}</span><span><small>TABLE</small><strong>{tableAttendees(preferredTable).length} / 12 SEATED</strong></span><Armchair size={18} /></div>
               <p className="form-assurance"><Leaf size={14} /> Your details are only used for event planning.</p>
-              <button className="submit-button" type="submit">{addGuest ? 'Reserve 2 places' : 'Reserve my place'} <ArrowRight size={17} /></button>
+              <TurnstileWidget
+                siteKey={TURNSTILE_SITE_KEY}
+                resetNonce={turnstileResetNonce}
+                onToken={(token) => {
+                  setTurnstileToken(token)
+                  setTurnstileError(false)
+                }}
+                onError={() => setTurnstileError(true)}
+              />
+              {turnstileError && <p className="turnstile-error" role="alert">Security verification could not load. Refresh the page and try again.</p>}
+              <button className="submit-button" type="submit" disabled={reservationMutation.isPending || !turnstileToken}>{reservationMutation.isPending ? 'Saving reservation…' : addGuest ? 'Reserve 2 places' : 'Reserve my place'} <ArrowRight size={17} /></button>
             </aside>
           </form>
           {formMessage && <p className="form-feedback error-feedback" role="alert">{formMessage}</p>}
@@ -433,9 +459,10 @@ function App() {
         <section className="seating-section" id="seating">
           <div className="section-heading board-heading">
             <div><p className="eyebrow">02 <span className="eyebrow-line" /> FIND YOUR PEOPLE</p><h2>The seating board</h2></div>
-            <div className="search-wrap"><Search size={17} /><input aria-label="Search by name, ticket or table number" placeholder="Find a name, ticket or table" value={search} onChange={(event) => setSearch(event.target.value)} /><span className="search-shortcut">⌕</span></div>
+            <div className="search-wrap"><Search size={17} /><input aria-label="Search by name or table number" placeholder="Find a name or table" value={search} onChange={(event) => setSearch(event.target.value)} /><span className="search-shortcut">⌕</span></div>
           </div>
           <div className="board-meta"><span><span className="board-dot occupied-dot" /> SEATED</span><span><span className="board-dot available-dot" /> AVAILABLE</span><span className="board-count">{attendeeCount} OF {totalCapacity} PLACES RESERVED</span></div>
+          {attendeesQuery.isError && <p className="form-feedback error-feedback" role="alert">The seating board could not load. Please refresh to try again.</p>}
 
           <div className="table-grid">
             {TABLES.map((table) => {
@@ -450,7 +477,7 @@ function App() {
                   <div className="occupancy-track"><span style={{ width: `${(guests.length / table.capacity) * 100}%` }} /></div>
                   <div className={`seat-list ${isExpanded ? 'is-expanded' : ''}`}>
                     {guests.length > 0 ? guests.map((attendee) => (
-                      <div className="seat-row occupied-seat" key={attendee.id}><span className="seat-status"><Check size={11} /></span><span className="seat-name">{attendee.name}<small>#{attendee.ticketNumber}{attendee.isGuest ? ' · GUEST' : ''}</small></span><span className="seat-type">{attendee.isGuest ? 'GUEST' : 'MEMBER'}</span></div>
+                      <div className="seat-row occupied-seat" key={attendee.id}><span className="seat-status"><Check size={11} /></span><span className="seat-name">{attendee.name}</span><span className="seat-type">{attendee.isGuest ? 'GUEST' : 'MEMBER'}</span></div>
                     )) : <div className="empty-notice"><span className="seat-status" /> A place is waiting for you</div>}
                     {Array.from({ length: table.capacity - guests.length }, (_, index) => <div className="seat-row available-seat" key={`available-${index}`}><span className="seat-status" /><span className="seat-name">Available</span></div>)}
                   </div>
@@ -462,7 +489,7 @@ function App() {
               )
             })}
           </div>
-          {matchingTables.size === 0 && search.trim() && <p className="no-results">No names, tickets or tables match “{search}”.</p>}
+          {matchingTables.size === 0 && search.trim() && <p className="no-results">No names or tables match “{search}”.</p>}
         </section>
       </main>
 

@@ -651,6 +651,18 @@ main,
     color: var(--mint);
 }
 
+.turnstile-widget {
+    min-height: 65px;
+    margin: 0 0 12px;
+}
+
+.turnstile-error {
+    margin: 0 0 12px;
+    color: #efc2ae;
+    font-size: 10px;
+    line-height: 1.5;
+}
+
 .submit-button {
     width: 100%;
     min-height: 44px;
@@ -672,6 +684,11 @@ main,
 .submit-button:hover {
     border-color: #cbe4bd;
     background: #cbe4bd;
+}
+
+.submit-button:disabled {
+    opacity: 0.58;
+    cursor: not-allowed;
 }
 
 .form-feedback {

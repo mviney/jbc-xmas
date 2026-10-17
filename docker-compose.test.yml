@@ -1,0 +1,14 @@
+services:
+  frontend:
+    build:
+      args:
+        VITE_SUPABASE_URL: ${TEST_SUPABASE_URL:?Set TEST_SUPABASE_URL in .env.test}
+        VITE_SUPABASE_ANON_KEY: ${TEST_SUPABASE_ANON_KEY:?Set TEST_SUPABASE_ANON_KEY in .env.test}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jbc-xmas-test.rule=Host(`jbc-xmas.test.bridge.monster.viney.net.au`)"
+      - "traefik.http.routers.jbc-xmas-test.entrypoints=websecure,websecure-wan"
+      - "traefik.http.routers.jbc-xmas-test.tls=true"
+      - "traefik.http.routers.jbc-xmas-test.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jbc-xmas-test.loadbalancer.server.port=8080"
+      - "traefik.docker.network=traefik-public"
