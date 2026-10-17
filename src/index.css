@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+:root {
+    font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+    color: #edf0e9;
+    background: #07120e;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-optical-sizing: auto;
+    font-weight: 400;
+
+    --forest: #07120e;
+    --forest-raised: #0d1b15;
+    --forest-soft: #13261c;
+    --line: rgba(191, 208, 182, 0.14);
+    --line-strong: rgba(191, 208, 182, 0.24);
+    --text: #edf0e9;
+    --muted: #98a79a;
+    --soft: #bcc6b9;
+    --mint: #b5d4a8;
+    --gold: #d3b978;
+    --paper: #e8e5d8;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html {
+    min-width: 320px;
+    scroll-behavior: smooth;
+    scroll-padding-top: 24px;
+}
+
+body {
+    min-width: 320px;
+    margin: 0;
+    background: var(--forest);
+}
+
+button,
+input,
+select {
+    font: inherit;
+}
+
+button,
+a,
+input,
+select {
+    -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+    outline: 2px solid var(--mint);
+    outline-offset: 3px;
+}
+
+::selection {
+    color: #06110c;
+    background: var(--mint);
+}
+
+#root {
+    min-height: 100svh;
+}
